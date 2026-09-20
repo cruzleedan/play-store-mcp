@@ -36,6 +36,7 @@ class TestServerTools:
             "promote_release",
             "get_releases",
             "halt_release",
+            "update_release_notes",
             "update_rollout",
             "get_app_details",
             "get_reviews",

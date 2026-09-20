@@ -86,9 +86,19 @@ WRITE_TOOLS = [
             "from_track": "internal",
             "to_track": "alpha",
             "version_code": 1,
+            "confirm": True,
         },
     ),
     ("halt_release", {"package_name": "com.example.app", "track": "production", "version_code": 1}),
+    (
+        "update_release_notes",
+        {
+            "package_name": "com.example.app",
+            "track": "production",
+            "version_code": 1,
+            "release_notes": "Fixed a crash",
+        },
+    ),
     (
         "update_rollout",
         {
@@ -546,6 +556,31 @@ def test_read_tool_not_blocked_in_read_only(monkeypatch):
 
     assert result == []
     mock_client.get_releases.assert_called_once_with("com.example.app")
+
+
+def test_promote_release_preview_not_blocked_in_read_only(monkeypatch):
+    """promote_release without confirm=True only previews — it must stay usable
+    in read-only mode, same as any other read tool, since it never mutates
+    anything (see PromotionPreview / preview_promote_release)."""
+    monkeypatch.setattr(server, "READ_ONLY", True)
+    mock_client = MagicMock()
+    mock_client.preview_promote_release.return_value.model_dump.return_value = {
+        "success": True,
+        "message": "Dry run only ...",
+    }
+    monkeypatch.setattr(server, "get_client_from_context", lambda: mock_client)
+
+    result = server.promote_release("com.example.app", "internal", "alpha", 1)
+
+    assert "error" not in result
+    mock_client.preview_promote_release.assert_called_once_with(
+        package_name="com.example.app",
+        from_track="internal",
+        to_track="alpha",
+        version_code=1,
+        rollout_percentage=100.0,
+    )
+    mock_client.promote_release.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

@@ -20,6 +20,7 @@ from play_store_mcp.models import (
     Listing,
     ListingUpdateResult,
     Order,
+    PromotionPreview,
     Release,
     Review,
     ReviewReplyResult,
@@ -51,6 +52,7 @@ from play_store_mcp.server import (
     promote_release,
     reply_to_review,
     update_listing,
+    update_release_notes,
     update_rollout,
     update_testers,
     validate_listing_text,
@@ -74,7 +76,7 @@ def test_server_uses_fastmcp_and_registers_all_tools() -> None:
 
     assert isinstance(server.mcp, fastmcp.FastMCP)
     tools = asyncio.run(server.mcp.list_tools())  # Sequence[Tool]
-    assert len(tools) == 117
+    assert len(tools) == 118
 
 
 @pytest.fixture
@@ -216,8 +218,32 @@ class TestDeployAppTool:
 class TestPromoteReleaseTool:
     """Test promote_release server tool."""
 
-    def test_promote_release(self, mock_client: MagicMock) -> None:
-        """Test promote_release tool."""
+    def test_promote_release_defaults_to_preview(self, mock_client: MagicMock) -> None:
+        """Without confirm=True, promote_release previews instead of committing."""
+        mock_client.preview_promote_release.return_value = PromotionPreview(
+            success=True,
+            package_name="com.example.app",
+            from_track="beta",
+            to_track="production",
+            version_code=100,
+            planned_release={"versionCodes": ["100"], "status": "completed"},
+            message="Dry run only — call again with confirm=True ...",
+        )
+
+        result = promote_release("com.example.app", "beta", "production", 100)
+
+        mock_client.preview_promote_release.assert_called_once_with(
+            package_name="com.example.app",
+            from_track="beta",
+            to_track="production",
+            version_code=100,
+            rollout_percentage=100.0,
+        )
+        mock_client.promote_release.assert_not_called()
+        assert result["success"] is True
+
+    def test_promote_release_confirm_commits(self, mock_client: MagicMock) -> None:
+        """confirm=True calls the real, committing promote_release."""
         mock_client.promote_release.return_value = DeploymentResult(
             success=True,
             package_name="com.example.app",
@@ -226,7 +252,7 @@ class TestPromoteReleaseTool:
             message="Promoted",
         )
 
-        result = promote_release("com.example.app", "beta", "production", 100)
+        result = promote_release("com.example.app", "beta", "production", 100, confirm=True)
 
         mock_client.promote_release.assert_called_once_with(
             package_name="com.example.app",
@@ -235,6 +261,7 @@ class TestPromoteReleaseTool:
             version_code=100,
             rollout_percentage=100.0,
         )
+        mock_client.preview_promote_release.assert_not_called()
         assert result["success"] is True
 
 
@@ -283,6 +310,31 @@ class TestHaltReleaseTool:
             package_name="com.example.app",
             track="production",
             version_code=100,
+        )
+        assert result["success"] is True
+
+
+class TestUpdateReleaseNotesTool:
+    """Test update_release_notes server tool."""
+
+    def test_update_release_notes(self, mock_client: MagicMock) -> None:
+        """Test update_release_notes tool."""
+        mock_client.update_release_notes.return_value = DeploymentResult(
+            success=True,
+            package_name="com.example.app",
+            track="production",
+            version_code=100,
+            message="Updated",
+        )
+
+        result = update_release_notes("com.example.app", "production", 100, "Fixed a crash")
+
+        mock_client.update_release_notes.assert_called_once_with(
+            package_name="com.example.app",
+            track="production",
+            version_code=100,
+            release_notes="Fixed a crash",
+            language="en-US",
         )
         assert result["success"] is True
 

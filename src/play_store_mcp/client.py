@@ -55,6 +55,7 @@ from play_store_mcp.models import (
     ProductPurchase,
     ProductPurchaseActionResult,
     ProductPurchaseV2,
+    PromotionPreview,
     Release,
     Review,
     ReviewReplyResult,
@@ -927,6 +928,136 @@ class PlayStoreClient:
                 version_code=version_code,
             )
 
+    def preview_promote_release(
+        self,
+        package_name: str,
+        from_track: str,
+        to_track: str,
+        version_code: int,
+        rollout_percentage: float = 100.0,
+    ) -> PromotionPreview:
+        """Preview what promote_release would submit, without committing anything.
+
+        promote_release sends body={"releases": [new_release]} to the target
+        track, which replaces its entire release list rather than merging
+        into it. This performs the same read-only lookups (source release,
+        target track's current state) and returns the resulting plan without
+        ever calling tracks().update() or committing the edit.
+
+        Args:
+            package_name: App package name.
+            from_track: Source track.
+            to_track: Destination track.
+            version_code: Version code to promote.
+            rollout_percentage: Rollout percentage for the target track.
+
+        Returns:
+            The planned release plus whatever already sits on the target
+            track (and would be replaced by it), or a failure result.
+        """
+        self._logger.info(
+            "Previewing promotion",
+            package_name=package_name,
+            from_track=from_track,
+            to_track=to_track,
+            version_code=version_code,
+        )
+
+        edit_id: str | None = None
+        try:
+            service = self._get_service()
+            edit_id = self._create_edit(package_name)
+
+            source_track = self._execute(
+                service.edits()
+                .tracks()
+                .get(packageName=package_name, editId=edit_id, track=from_track)
+            )
+
+            source_release = None
+            for release in source_track.get("releases", []):
+                version_codes = [int(vc) for vc in release.get("versionCodes", [])]
+                if version_code in version_codes:
+                    source_release = release
+                    break
+
+            if not source_release:
+                self._delete_edit(package_name, edit_id)
+                return PromotionPreview(
+                    success=False,
+                    package_name=package_name,
+                    from_track=from_track,
+                    to_track=to_track,
+                    version_code=version_code,
+                    message=f"Version {version_code} not found in {from_track}",
+                    error="VersionNotFound",
+                )
+
+            planned_release: dict[str, Any] = {
+                "versionCodes": [str(version_code)],
+                "releaseNotes": source_release.get("releaseNotes", []),
+            }
+            if rollout_percentage < 100:
+                planned_release["status"] = "inProgress"
+                planned_release["userFraction"] = rollout_percentage / 100.0
+            else:
+                planned_release["status"] = "completed"
+
+            target_track = self._execute(
+                service.edits()
+                .tracks()
+                .get(packageName=package_name, editId=edit_id, track=to_track)
+            )
+            existing = [
+                Release(
+                    package_name=package_name,
+                    track=to_track,
+                    status=r.get("status", "unknown"),
+                    version_codes=[int(vc) for vc in r.get("versionCodes", [])],
+                    version_name=r.get("name"),
+                    rollout_percentage=(r.get("userFraction", 1.0) * 100),
+                    release_notes={
+                        n.get("language", "en-US"): n.get("text", "")
+                        for n in r.get("releaseNotes", [])
+                    },
+                )
+                for r in target_track.get("releases", [])
+            ]
+
+            message = (
+                f"Dry run only — call again with confirm=True to promote version "
+                f"{version_code} from {from_track} to {to_track}."
+            )
+            if existing:
+                message += (
+                    f" WARNING: {to_track} currently has {len(existing)} release(s) "
+                    "that this call would REPLACE entirely, not merge with."
+                )
+
+            self._delete_edit(package_name, edit_id)
+            return PromotionPreview(
+                success=True,
+                package_name=package_name,
+                from_track=from_track,
+                to_track=to_track,
+                version_code=version_code,
+                planned_release=planned_release,
+                existing_releases_on_target=existing,
+                message=message,
+            )
+
+        except Exception as e:
+            return self._fail_result(
+                PromotionPreview,
+                "Promotion preview failed",
+                e,
+                edit_id=edit_id,
+                package_name=package_name,
+                from_track=from_track,
+                to_track=to_track,
+                version_code=version_code,
+            )
+
     def halt_release(self, package_name: str, track: str, version_code: int) -> DeploymentResult:
         """Halt a staged rollout.
 
@@ -1003,6 +1134,106 @@ class PlayStoreClient:
             return self._fail_result(
                 DeploymentResult,
                 "Halt failed",
+                e,
+                edit_id=edit_id,
+                package_name=package_name,
+                track=track,
+                version_code=version_code,
+            )
+
+    def update_release_notes(
+        self,
+        package_name: str,
+        track: str,
+        version_code: int,
+        release_notes: str,
+        language: str = "en-US",
+    ) -> DeploymentResult:
+        """Update the release notes for an existing release, without redeploying.
+
+        Fetches the track's current releases and replaces only the matching
+        release's notes for `language` (other languages and every other
+        release on the track are preserved) -- the same fetch-then-mutate
+        pattern as halt_release/update_rollout, not the replace-the-whole-
+        list pattern deploy_app/promote_release use.
+
+        Args:
+            package_name: App package name.
+            track: Track with the release to update.
+            version_code: Version code to update.
+            release_notes: New release notes text.
+            language: Language code for the notes (default: en-US).
+
+        Returns:
+            Deployment result.
+        """
+        self._logger.info(
+            "Updating release notes",
+            package_name=package_name,
+            track=track,
+            version_code=version_code,
+            language=language,
+        )
+
+        edit_id: str | None = None
+        try:
+            service = self._get_service()
+            edit_id = self._create_edit(package_name)
+
+            current_track = self._execute(
+                service.edits().tracks().get(packageName=package_name, editId=edit_id, track=track)
+            )
+
+            releases = current_track.get("releases", [])
+            updated = False
+            for release in releases:
+                version_codes = [int(vc) for vc in release.get("versionCodes", [])]
+                if version_code in version_codes:
+                    notes = [
+                        n for n in release.get("releaseNotes", []) if n.get("language") != language
+                    ]
+                    notes.append({"language": language, "text": release_notes})
+                    release["releaseNotes"] = notes
+                    updated = True
+                    break
+
+            if not updated:
+                self._delete_edit(package_name, edit_id)
+                return DeploymentResult(
+                    success=False,
+                    package_name=package_name,
+                    track=track,
+                    version_code=version_code,
+                    message=f"Version {version_code} not found in {track}",
+                    error="VersionNotFound",
+                )
+
+            self._execute(
+                service.edits()
+                .tracks()
+                .update(
+                    packageName=package_name,
+                    editId=edit_id,
+                    track=track,
+                    body={"releases": releases},
+                )
+            )
+
+            self._commit_edit(package_name, edit_id)
+
+            return DeploymentResult(
+                success=True,
+                edit_id=edit_id,
+                package_name=package_name,
+                track=track,
+                version_code=version_code,
+                message=f"Updated [{language}] release notes for version {version_code} on {track}",
+            )
+
+        except Exception as e:
+            return self._fail_result(
+                DeploymentResult,
+                "Release notes update failed",
                 e,
                 edit_id=edit_id,
                 package_name=package_name,

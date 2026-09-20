@@ -57,6 +57,27 @@ class DeploymentResult(OperationResult):
     version_code: int | None = Field(None, description="Deployed version code")
 
 
+class PromotionPreview(OperationResult):
+    """Dry-run preview of a promote_release call — nothing is sent to Play.
+
+    promote_release replaces a track's entire releases[] with a single new
+    entry rather than merging into it, so this surfaces what's currently on
+    the target track (and would be silently discarded) before that happens.
+    """
+
+    package_name: str = Field(..., description=_DESC_PACKAGE_NAME)
+    from_track: str = Field(..., description="Source track")
+    to_track: str = Field(..., description="Destination track")
+    version_code: int = Field(..., description="Version code being promoted")
+    planned_release: dict[str, Any] = Field(
+        default_factory=dict, description="The release object promote_release would submit"
+    )
+    existing_releases_on_target: list[Release] = Field(
+        default_factory=list,
+        description="Releases currently on the target track that promoting would REPLACE",
+    )
+
+
 class AppDetails(BaseModel):
     """Detailed app information."""
 

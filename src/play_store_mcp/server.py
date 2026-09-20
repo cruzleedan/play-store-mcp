@@ -319,8 +319,15 @@ def promote_release(
     to_track: str,
     version_code: int,
     rollout_percentage: float = 100.0,
+    confirm: bool = False,
 ) -> dict[str, Any]:
     """Promote a release from one track to another.
+
+    Dry run by default: without confirm=True this only previews the
+    change -- including any release(s) already on the target track that
+    would be replaced (promote_release overwrites the target track's
+    entire release list, it does not merge into it) -- and calls nothing
+    that mutates Play Console. Pass confirm=True to actually commit it.
 
     Args:
         package_name: App package name
@@ -328,17 +335,31 @@ def promote_release(
         to_track: Destination track (alpha, beta, production)
         version_code: Version code to promote
         rollout_percentage: Rollout percentage for target track (0-100)
+        confirm: Set True to commit the promotion. Defaults to False
+            (preview only).
 
     Returns:
-        Promotion result with success status and details
+        A dry-run preview (confirm=False) or the promotion result
+        (confirm=True).
     """
-    if blocked := _read_only_block("promote_release"):
-        return blocked
     if err := _validate_rollout(rollout_percentage):
         return {"error": err}
 
-    client = get_client_from_context()
+    if not confirm:
+        client = get_client_from_context()
+        preview = client.preview_promote_release(
+            package_name=package_name,
+            from_track=from_track,
+            to_track=to_track,
+            version_code=version_code,
+            rollout_percentage=rollout_percentage,
+        )
+        return preview.model_dump()
 
+    if blocked := _read_only_block("promote_release"):
+        return blocked
+
+    client = get_client_from_context()
     result = client.promote_release(
         package_name=package_name,
         from_track=from_track,
@@ -393,6 +414,46 @@ def halt_release(
         package_name=package_name,
         track=track,
         version_code=version_code,
+    )
+
+    return result.model_dump()
+
+
+@mcp.tool()
+def update_release_notes(
+    package_name: str,
+    track: str,
+    version_code: int,
+    release_notes: str,
+    language: str = "en-US",
+) -> dict[str, Any]:
+    """Update the release notes for an existing release, without redeploying.
+
+    Use this to fix a typo or add detail to already-live "what's new" text
+    for a specific track/version, without promoting or uploading a new
+    build. Only the given language's notes are replaced -- other languages
+    and every other release on the track are left untouched.
+
+    Args:
+        package_name: App package name
+        track: Track containing the release (internal, alpha, beta, production)
+        version_code: Version code of the release to update
+        release_notes: New release notes text
+        language: Language code for the notes (default: en-US)
+
+    Returns:
+        Result with success status and details
+    """
+    if blocked := _read_only_block("update_release_notes"):
+        return blocked
+    client = get_client_from_context()
+
+    result = client.update_release_notes(
+        package_name=package_name,
+        track=track,
+        version_code=version_code,
+        release_notes=release_notes,
+        language=language,
     )
 
     return result.model_dump()

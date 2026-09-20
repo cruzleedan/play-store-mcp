@@ -398,6 +398,83 @@ class TestHaltRelease:
         assert "oops" in result.message
 
 
+class TestUpdateReleaseNotes:
+    """Test update_release_notes method."""
+
+    def test_update_success_replaces_only_target_language(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        """Updating en-US notes leaves an existing es-ES entry and other releases alone."""
+        mock_edits = _mock_service.edits.return_value
+        mock_edits.insert.return_value.execute.return_value = {"id": "edit-123"}
+        mock_edits.tracks.return_value.get.return_value.execute.return_value = {
+            "track": "production",
+            "releases": [
+                {
+                    "versionCodes": ["100"],
+                    "status": "completed",
+                    "releaseNotes": [
+                        {"language": "en-US", "text": "old notes"},
+                        {"language": "es-ES", "text": "notas"},
+                    ],
+                },
+                {"versionCodes": ["99"], "status": "halted"},
+            ],
+        }
+        mock_edits.tracks.return_value.update.return_value.execute.return_value = {}
+        mock_edits.commit.return_value.execute.return_value = {}
+
+        result = client.update_release_notes(
+            "com.example.app", "production", 100, "new notes", language="en-US"
+        )
+
+        assert result.success is True
+        submitted_releases = mock_edits.tracks.return_value.update.call_args.kwargs["body"][
+            "releases"
+        ]
+        assert len(submitted_releases) == 2  # other release preserved
+        updated = next(r for r in submitted_releases if r["versionCodes"] == ["100"])
+        assert {"language": "en-US", "text": "new notes"} in updated["releaseNotes"]
+        assert {"language": "es-ES", "text": "notas"} in updated["releaseNotes"]
+
+    def test_update_version_not_found(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        """Test update with nonexistent version."""
+        mock_edits = _mock_service.edits.return_value
+        mock_edits.insert.return_value.execute.return_value = {"id": "edit-123"}
+        mock_edits.tracks.return_value.get.return_value.execute.return_value = {
+            "track": "production",
+            "releases": [{"versionCodes": ["99"]}],
+        }
+        mock_edits.delete.return_value.execute.return_value = None
+
+        result = client.update_release_notes("com.example.app", "production", 100, "text")
+
+        assert result.success is False
+        assert "not found" in result.message
+
+    def test_update_http_error(
+        self,
+        client: PlayStoreClient,
+        _mock_service: MagicMock,
+    ) -> None:
+        """Test update failure from HttpError."""
+        mock_edits = _mock_service.edits.return_value
+        mock_edits.insert.return_value.execute.return_value = {"id": "edit-123"}
+        mock_edits.tracks.return_value.get.return_value.execute.side_effect = _make_http_error(500)
+        mock_edits.delete.return_value.execute.return_value = None
+
+        result = client.update_release_notes("com.example.app", "production", 100, "text")
+
+        assert result.success is False
+        assert "Release notes update failed" in result.message
+
+
 # =========================================================================
 # update_rollout tests
 # =========================================================================
